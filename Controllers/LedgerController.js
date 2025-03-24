@@ -12,6 +12,7 @@ const path = require("path");
 const fs = require("fs");
 const { notifySubscribers } = require('../Middleware/webhookService');
 const excelWithdrawModel = require('../Models/ExcelWithdrawModel');
+const mongoose = require("mongoose");
 
 
 // Function to extract amount and transaction ID from text
@@ -242,98 +243,136 @@ const createData = async (req, res) => {
 
 
 
-// 2. Get all s
+// 2. Get all 
 const getAllAdminData = async (req, res) => {
     try {
-        // Extract the token from the Authorization header
         const token = req.header('Authorization')?.replace('Bearer ', '');
-
         if (!token) {
             return res.status(401).json({ status: 'fail', message: 'No token provided' });
         }
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const adminId = decoded.adminId;
-
         if (!adminId) {
             return res.status(400).json({ status: 'fail', message: 'Admin not found!' });
         }
 
-        let search = req.query.search || "";
-        let page = req.query.page || "1";
-        const limit = req.query.limit || "10";
-
+        let { search = "", utr, status, type, trnNo, bankId, merchantId, adminStaffId, startDate, endDate } = req.query;
+        let page = parseInt(req.query.page) || 1;
+        let limit = parseInt(req.query.limit) || 10;
         let query = { adminId };
 
         if (search) {
             query.$or = [
                 { utr: { $regex: search, $options: "i" } },
+                { trnNo: { $regex: search, $options: "i" } },
                 { _id: { $regex: search, $options: "i" } }
             ];
-        }
+        };
 
-        if (req.query.status) query.status = req.query.status;
-        if (req.query.type) query.type = req.query.type;
-        if (req.query.utr) query.utr = { $regex: req.query.utr, $options: "i" };
-        if (req.query.trnNo) query.trnNo = { $regex: req.query.trnNo, $options: "i" };
-        if (req.query.bankId) query.bankId = req.query.bankId;
-        if (req.query.merchantId) query.merchantId = req.query.merchantId;
+        if (utr) {
+            query.$or = [
+                { utr: { $regex: utr, $options: "i" } },
+                { trnNo: { $regex: utr, $options: "i" } }
+            ];
+        };
 
-        // If adminStaffId is provided, apply filtering based on associated merchants, banks, and types
-        if (req.query.adminStaffId) {
-            const dataStaff = await AdminStaff.findById(req.query.adminStaffId);
+        if (status) query.status = status;
+        if (type) query.type = type;
+        if (trnNo) query.trnNo = { $regex: trnNo, $options: "i" };
+        if (bankId) query.bankId = bankId;
+        if (merchantId) query.merchantId = merchantId;
 
+        if (adminStaffId) {
+            const dataStaff = await AdminStaff.findById(adminStaffId);
             if (dataStaff) {
-                if (dataStaff.ledgerMerchant?.length > 0) {
-                    query.merchantId = { $in: dataStaff.ledgerMerchant };
-                }
-
-                if (dataStaff.ledgerBank?.length > 0) {
-                    query.bankId = { $in: dataStaff.ledgerBank }; // Fixed incorrect reference
-                }
-
-                if (dataStaff.ledgerType?.length > 0) {
-                    query.type = { $in: dataStaff.ledgerType };
-                }
+                if (dataStaff.ledgerMerchant?.length) query.merchantId = { $in: dataStaff.ledgerMerchant };
+                if (dataStaff.ledgerBank?.length) query.bankId = { $in: dataStaff.ledgerBank };
+                if (dataStaff.ledgerType?.length) query.type = { $in: dataStaff.ledgerType };
             }
         }
 
-        // Filter by createdAt (date range)
-        if (req.query.startDate || req.query.endDate) {
-            query.createdAt = {};
+        if (startDate && endDate) {
+            const formatDate = (date) => {
+                const d = new Date(date);
+                return `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
+            };
 
-            // If startDate is provided
-            if (req.query.startDate) {
-                const startDate = new Date(req.query.startDate);
-                startDate.setHours(0, 0, 0, 0); // Start of the day
-                query.createdAt.$gte = startDate;
-            }
+            const start = formatDate(startDate);
 
-            // If endDate is provided
-            if (req.query.endDate) {
-                const endDate = new Date(req.query.endDate);
-                endDate.setHours(23, 59, 59, 999); // End of the day
-                query.createdAt.$lte = endDate;
-            }
+            const end = formatDate(endDate);
 
-            // Ensure both startDate and endDate are properly set
-            if (req.query.startDate === req.query.endDate) {
-                query.createdAt = {
-                    $gte: new Date(new Date(req.query.startDate).setHours(0, 0, 0, 0)),
-                    $lte: new Date(new Date(req.query.endDate).setHours(23, 59, 59, 999)),
-                };
-            }
+            console.log("date ", start, end);
+
+            const matchStage = {
+                ...(status && { status }),
+                ...(merchantId && { merchantId: new mongoose.Types.ObjectId(merchantId) }),
+                ...(bankId && { bankId: new mongoose.Types.ObjectId(bankId) }),
+                ...(utr && {
+                    $or: [
+                        { utr: { $regex: utr, $options: "i" } },
+                        { trnNo: { $regex: utr, $options: "i" } }
+                    ]
+                }),
+                createdAt: { $gte: new Date(startDate), $lte: new Date(endDate) }
+            };
+
+            const countResult = await Ledger.aggregate([
+                { $match: matchStage },
+                { $count: "totalCount" }
+            ]);
+
+            const totalCount = countResult.length > 0 ? countResult[0].totalCount : 0;
+
+            const data = await Ledger.aggregate([
+                { $match: matchStage },
+                {
+                    $lookup: {
+                        from: "banks",
+                        localField: "bankId",
+                        foreignField: "_id",
+                        as: "bankId"
+                    }
+                },
+                {
+                    $lookup: {
+                        from: "merchants",
+                        localField: "merchantId",
+                        foreignField: "_id",
+                        as: "merchantId"
+                    }
+                },
+                {
+                    $unwind: {
+                        path: "$bankId",
+                        preserveNullAndEmptyArrays: true
+                    }
+                },
+                {
+                    $unwind: {
+                        path: "$merchantId",
+                        preserveNullAndEmptyArrays: true
+                    }
+                },
+                { $sort: { createdAt: -1 } },
+                { $skip: (page - 1) * limit },
+                { $limit: limit }
+            ]);
+
+            return res.status(200).json({
+                status: "ok",
+                data,
+                search,
+                page,
+                count: totalCount,
+                totalPages: Math.ceil(totalCount / limit),
+                currentPage: page,
+                limit
+            });
         }
 
 
-
-        // Fetch paginated data with applied filters
-        const data = await Ledger.find(query)
-            .populate(["bankId", "merchantId"])
-            .sort({ createdAt: -1 })
-            .limit(limit * 1)
-            .skip((page - 1) * limit)
-            .exec();
+        const data = await Ledger.find(query).populate(["bankId", "merchantId"]).sort({ createdAt: -1 }).limit(limit * 1).skip((page - 1) * limit).exec();
 
         const count = await Ledger.countDocuments(query);
 
@@ -368,144 +407,132 @@ const convertToGST = (utcDateStr) => {
 // 2. Get all s
 const getAllAdminDataWithoutPag = async (req, res) => {
     try {
-        // Extract the token from the Authorization header
         const token = req.header('Authorization')?.replace('Bearer ', '');
-
         if (!token) {
             return res.status(401).json({ status: 'fail', message: 'No token provided' });
         }
 
-
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const adminId = decoded.adminId;
-
-
         if (!adminId) {
             return res.status(400).json({ status: 'fail', message: 'Admin not found!' });
         }
 
-
-
-        var search = "";
-        if (req.query.search) {
-            search = req.query.search;
-        }
-
-        var page = "1";
-        if (req.query.page) {
-            page = req.query.page;
-        }
-
-        const limit = req.query.limit ? req.query.limit : "10";
-
-
-        const query = {};
-
-        query.adminId = adminId
-
+        let { search = "", utr, status, type, trnNo, bankId, merchantId, adminStaffId, startDate, endDate } = req.query;
+        let query = { adminId };
 
         if (search) {
-            query.utr = { $regex: ".*" + search + ".*", $options: "i" };
-            query._id = { $regex: ".*" + search + ".*", $options: "i" };
-        }
+            query.$or = [
+                { utr: { $regex: search, $options: "i" } },
+                { trnNo: { $regex: search, $options: "i" } },
+                { _id: { $regex: search, $options: "i" } }
+            ];
+        };
 
-        if (req.query.status) {
-            query.status = req.query.status;
-        }
-        if (req.query.type) {
-            query.type = req.query.type;
-        }
+        if (utr) {
+            query.$or = [
+                { utr: { $regex: utr, $options: "i" } },
+                { trnNo: { $regex: utr, $options: "i" } }
+            ];
+        };
 
+        if (status) query.status = status;
+        if (type) query.type = type;
+        if (trnNo) query.trnNo = { $regex: trnNo, $options: "i" };
+        if (bankId) query.bankId = bankId;
+        if (merchantId) query.merchantId = merchantId;
 
-
-        if (req.query.utr) {
-            query.utr = { $regex: req.query.utr, $options: "i" };
-        }
-
-        if (req.query.trnNo) {
-            query.trnNo = { $regex: req.query.trnNo, $options: "i" };
-        }
-
-
-
-        if (req.query.bankId) {
-            query.bankId = req.query.bankId;
-        }
-
-
-
-
-
-        if (req.query.merchantId) {
-            query.merchantId = req.query.merchantId;
-        }
-
-
-
-        if (req.query.adminStaffId) {
-
-            const dataStaff = await AdminStaff.findById(req.query.adminStaffId);
-
-            if (dataStaff?.ledgerMerchant && dataStaff.ledgerMerchant.length > 0) {
-                query.merchantId = { $in: dataStaff.ledgerMerchant }; // Filter by merchant IDs in the array
-            }
-
-            if (dataStaff?.ledgerBank && dataStaff.ledgerBank.length > 0) {
-                query.bankId = { $in: dataStaff.ledgerMerchant }; // Filter by merchant IDs in the array
-            }
-
-            if (dataStaff?.ledgerType && dataStaff.ledgerType.length > 0) {
-                query.type = { $in: dataStaff.ledgerType }; // Filter by merchant IDs in the array
-            }
-
-        }
-
-
-
-
-        // Filter by createdAt (date range)
-        if (req.query.startDate || req.query.endDate) {
-            query.createdAt = {};
-
-            // If startDate is provided
-            if (req.query.startDate) {
-                const startDate = new Date(req.query.startDate);
-                startDate.setHours(0, 0, 0, 0); // Start of the day
-                query.createdAt.$gte = startDate;
-            }
-
-            // If endDate is provided
-            if (req.query.endDate) {
-                const endDate = new Date(req.query.endDate);
-                endDate.setHours(23, 59, 59, 999); // End of the day
-                query.createdAt.$lte = endDate;
-            }
-
-            // Ensure both startDate and endDate are properly set
-            if (req.query.startDate === req.query.endDate) {
-                query.createdAt = {
-                    $gte: new Date(new Date(req.query.startDate).setHours(0, 0, 0, 0)),
-                    $lte: new Date(new Date(req.query.endDate).setHours(23, 59, 59, 999)),
-                };
+        if (adminStaffId) {
+            const dataStaff = await AdminStaff.findById(adminStaffId);
+            if (dataStaff) {
+                if (dataStaff.ledgerMerchant?.length) query.merchantId = { $in: dataStaff.ledgerMerchant };
+                if (dataStaff.ledgerBank?.length) query.bankId = { $in: dataStaff.ledgerBank };
+                if (dataStaff.ledgerType?.length) query.type = { $in: dataStaff.ledgerType };
             }
         }
 
+        if (startDate && endDate) {
+            const formatDate = (date) => {
+                const d = new Date(date);
+                return `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
+            };
+
+            const start = formatDate(startDate);
+
+            const end = formatDate(endDate);
+
+            const matchStage = {
+                ...(status && { status }),
+                ...(merchantId && { merchantId: new mongoose.Types.ObjectId(merchantId) }),
+                ...(bankId && { bankId: new mongoose.Types.ObjectId(bankId) }),
+                ...(utr && {
+                    $or: [
+                        { utr: { $regex: utr, $options: "i" } },
+                        { trnNo: { $regex: utr, $options: "i" } }
+                    ]
+                }),
+                createdAt: { $gte: new Date(startDate), $lte: new Date(endDate) }
+            };
+
+            const countResult = await Ledger.aggregate([
+                { $match: matchStage },
+                { $count: "totalCount" }
+            ]);
+
+            const totalCount = countResult.length > 0 ? countResult[0].totalCount : 0;
+
+            const data = await Ledger.aggregate([
+                { $match: matchStage },
+                {
+                    $lookup: {
+                        from: "banks",
+                        localField: "bankId",
+                        foreignField: "_id",
+                        as: "bankId"
+                    }
+                },
+                {
+                    $lookup: {
+                        from: "merchants",
+                        localField: "merchantId",
+                        foreignField: "_id",
+                        as: "merchantId"
+                    }
+                },
+                {
+                    $unwind: {
+                        path: "$bankId",
+                        preserveNullAndEmptyArrays: true
+                    }
+                },
+                {
+                    $unwind: {
+                        path: "$merchantId",
+                        preserveNullAndEmptyArrays: true
+                    }
+                },
+                { $sort: { createdAt: -1 } }
+            ]);
+
+            return res.status(200).json({
+                status: "ok",
+                data,
+                search,
+                count: totalCount
+            });
+        }
 
 
+        const data = await Ledger.find(query).populate(["bankId", "merchantId"]).sort({ createdAt: -1 }).exec();
 
-
-        // Find data created by the agent, sorted by `createdAt` in descending order
-        const data = await Ledger.find(query).populate(["bankId", "merchantId"]).sort({ createdAt: -1 })
-
-
+        const count = await Ledger.countDocuments(query);
 
         return res.status(200).json({
             status: "ok",
-            data
+            data,
+            search,
+            count
         });
-
-        // Find data created by the agent, sorted by `createdAt` in descending order
-
 
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -891,94 +918,144 @@ const getCardAdminData = async (req, res) => {
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const adminId = decoded.adminId;
+
         if (!adminId) {
             return res.status(400).json({ status: 'fail', message: 'Admin not found!' });
         }
 
         const { status, filter, startDate, endDate } = req.query;
-        let dateFilter = {};
-        const now = new Date();
 
-        // Handle Start and End Date Filtering
-        if (startDate || endDate) {
-            dateFilter.createdAt = {};
-
-            if (startDate) {
-                const start = new Date(startDate);
-                if (!isNaN(start)) {
-                    start.setHours(0, 0, 0, 0);
-                    dateFilter.createdAt.$gte = start;
-                }
-            }
-
-            if (endDate) {
-                const end = new Date(endDate);
-                if (!isNaN(end)) {
-                    end.setHours(23, 59, 59, 999);
-                    dateFilter.createdAt.$lte = end;
-                }
-            }
-
-            // Ensure both startDate and endDate are properly handled
-            if (startDate && endDate && new Date(startDate).getTime() === new Date(endDate).getTime()) {
-                dateFilter.createdAt = {
-                    $gte: new Date(startDate).setHours(0, 0, 0, 0),
-                    $lte: new Date(endDate).setHours(23, 59, 59, 999),
-                };
-            }
-        }
-
-        // Apply Time Filter (Only if Start/End Date is NOT used)
-        if (!startDate && !endDate) {
-            switch (filter) {
-                case 'today':
-                    dateFilter = {
-                        createdAt: {
-                            $gte: new Date().setHours(0, 0, 0, 0),
-                            $lt: new Date().setHours(23, 59, 59, 999),
-                        },
-                    };
-                    break;
-                case '7days':
-                    dateFilter = {
-                        createdAt: {
-                            $gte: new Date(new Date().setDate(now.getDate() - 7)),
-                        },
-                    };
-                    break;
-                case '30days':
-                    dateFilter = {
-                        createdAt: {
-                            $gte: new Date(new Date().setDate(now.getDate() - 30)),
-                        },
-                    };
-                    break;
-                case 'all':
-                default:
-                    dateFilter = {}; // No filter applied
-                    break;
-            }
-        }
-
-        const query = {
-            ...dateFilter,
-            ...(status && { status }),
-            adminId
+        const formatDate = (date) => {
+            const d = new Date(date);
+            const day = String(d.getDate()).padStart(2, '0');
+            const month = String(d.getMonth() + 1).padStart(2, '0');
+            const year = String(d.getFullYear());
+            return `${day}-${month}-${year}`;
         };
 
-        const data = await Ledger.find(query);
+        const fn_calculation = async (data) => {
 
-        const totalSum = data.reduce((sum, record) => sum + (record.total || 0), 0);
-        const merchantTotalSum = data.reduce((sum, record) => sum + (record.merchantTotal || 0), 0);
-        const adminTotalSum = data.reduce((sum, record) => sum + (record.adminTotal || 0), 0);
+            const totalSum = data.reduce((sum, record) => sum + (record.total || 0), 0);
+            const merchantTotalSum = data.reduce((sum, record) => sum + (record.merchantTotal || 0), 0);
+            const adminTotalSum = data.reduce((sum, record) => sum + (record.adminTotal || 0), 0);
 
-        return res.status(200).json({
-            status: 'ok',
-            data: totalSum,
-            merchantTotalSum,
-            adminTotalSum,
-            totalTransaction: data.length
-        });
+            return res.status(200).json({
+                status: 'ok',
+                data: totalSum,
+                merchantTotalSum,
+                adminTotalSum,
+                totalTransaction: data?.length || 0
+            });
+        };
+
+        if (filter === "today") {
+            const today = formatDate(new Date());
+
+            const data = await Ledger.aggregate([
+                {
+                    $addFields: {
+                        createdAtFormatted: {
+                            $dateToString: { format: "%d-%m", date: "$createdAt" }
+                        }
+                    }
+                },
+                {
+                    $match: { "createdAtFormatted": today, "status": status }
+                }
+            ]);
+            return fn_calculation(data);
+        };
+
+        if (filter === "7days") {
+            const today = formatDate(new Date());
+            const sevenDaysAgo = formatDate(new Date(new Date().setDate(new Date().getDate() - 7)));
+
+            const data = await Ledger.aggregate([
+                {
+                    $addFields: {
+                        createdAtFormatted: {
+                            $dateToString: { format: "%d-%m", date: "$createdAt" }
+                        }
+                    }
+                },
+                {
+                    $match: {
+                        "createdAtFormatted": { $gte: sevenDaysAgo, $lte: today },
+                        "status": status
+                    }
+                }
+            ]);
+
+            return fn_calculation(data);
+        };
+
+        if (filter === "30days") {
+            const today = new Date();
+            const thirtyDaysAgo = new Date();
+            thirtyDaysAgo.setDate(today.getDate() - 30);
+
+            const data = await Ledger.aggregate([
+                {
+                    $match: {
+                        "createdAt": { $gte: thirtyDaysAgo, $lte: today },
+                        "status": status
+                    }
+                }
+            ]);
+
+            return fn_calculation(data);
+        };
+
+        if (filter === "all") {
+            const data = await Ledger.aggregate([
+                {
+                    $match: {
+                        "status": status
+                    }
+                }
+            ]);
+
+            return fn_calculation(data);
+        };
+
+        if (filter === "custom") {
+            const start = formatDate(new Date(startDate));
+            const oldEnd = formatDate(new Date(endDate));
+            const formatedEndDate = oldEnd.split("-")?.[0] == 1 ? 31 : oldEnd.split("-")?.[0] - 1;
+            const formatedEndMonth = oldEnd.split("-")?.[1] == 1 ? 12 : oldEnd.split("-")?.[0] == 1 ? oldEnd.split("-")?.[1] - 1 : oldEnd.split("-")?.[1];
+            const end = `${formatedEndDate}-${formatedEndMonth}-${oldEnd.split("-")?.[2]}`;
+
+            console.log("format ", start, end);
+
+            const data = await Ledger.aggregate([
+                {
+                    $addFields: {
+                        createdAtFormatted: {
+                            $dateToString: { format: "%d-%m-%Y", date: "$createdAt" }
+                        }
+                    }
+                },
+                {
+                    $match: {
+                        "createdAtFormatted": { $gte: start, $lte: end },
+                        "status": status
+                    }
+                }
+            ]);
+
+            return fn_calculation(data);
+        };
+
+        const data = await Ledger.aggregate([
+            {
+                $match: {
+                    "status": status
+                }
+            }
+        ]);
+
+        return fn_calculation(data);
+
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
