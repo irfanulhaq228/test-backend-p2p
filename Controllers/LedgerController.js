@@ -302,7 +302,7 @@ const getAllAdminData = async (req, res) => {
 
             const end = formatDate(endDate);
 
-            console.log("date ", start, end);
+            console.log("date ", startDate, endDate);
 
             const matchStage = {
                 ...(status && { status }),
@@ -613,30 +613,18 @@ const getAllMerchantData = async (req, res) => {
 
         // Filter by createdAt (date range)
         if (req.query.startDate || req.query.endDate) {
-            query.createdAt = {};
-
-            // If startDate is provided
-            if (req.query.startDate) {
-                const startDate = new Date(req.query.startDate);
-                startDate.setHours(0, 0, 0, 0); // Set time to the beginning of the day (00:00:00)
-                query.createdAt.$gte = startDate;
-            }
-
-            // If endDate is provided
-            if (req.query.endDate) {
-                const endDate = new Date(req.query.endDate);
-                endDate.setHours(23, 59, 59, 999); // Set time to the end of the day (23:59:59)
-                query.createdAt.$lte = endDate;
-            }
-
-            // If startDate and endDate are the same, this will ensure it gets the full range within that day
-            if (req.query.startDate === req.query.endDate) {
-                query.createdAt = {
-                    $gte: new Date(req.query.startDate).setHours(0, 0, 0, 0),
-                    $lte: new Date(req.query.endDate).setHours(23, 59, 59, 999),
-                };
-            }
+            const startDate = new Date(req.query.startDate);
+            const endDate = new Date(req.query.endDate);
+            
+            // Ensure endDate includes the full day
+            endDate.setUTCHours(23, 59, 59, 999);
+        
+            console.log(startDate, endDate);
+        
+            query.createdAt = { $gte: startDate, $lte: endDate };
         }
+        
+        
 
 
 
@@ -648,6 +636,9 @@ const getAllMerchantData = async (req, res) => {
 
 
         const count = await Ledger.find(query).populate(["bankId"]).sort({ createdAt: -1 }).countDocuments();
+
+        console.log(count);
+        
 
         return res.status(200).json({
             status: "ok",
@@ -740,29 +731,15 @@ const getAllMerchantDataWithoutFilter = async (req, res) => {
 
         // Filter by createdAt (date range)
         if (req.query.startDate || req.query.endDate) {
-            query.createdAt = {};
-
-            // If startDate is provided
-            if (req.query.startDate) {
-                const startDate = new Date(req.query.startDate);
-                startDate.setHours(0, 0, 0, 0); // Set time to the beginning of the day (00:00:00)
-                query.createdAt.$gte = startDate;
-            }
-
-            // If endDate is provided
-            if (req.query.endDate) {
-                const endDate = new Date(req.query.endDate);
-                endDate.setHours(23, 59, 59, 999); // Set time to the end of the day (23:59:59)
-                query.createdAt.$lte = endDate;
-            }
-
-            // If startDate and endDate are the same, this will ensure it gets the full range within that day
-            if (req.query.startDate === req.query.endDate) {
-                query.createdAt = {
-                    $gte: new Date(req.query.startDate).setHours(0, 0, 0, 0),
-                    $lte: new Date(req.query.endDate).setHours(23, 59, 59, 999),
-                };
-            }
+            const startDate = new Date(req.query.startDate);
+            const endDate = new Date(req.query.endDate);
+            
+            // Ensure endDate includes the full day
+            endDate.setUTCHours(23, 59, 59, 999);
+        
+            console.log(startDate, endDate);
+        
+            query.createdAt = { $gte: startDate, $lte: endDate };
         }
 
 
@@ -925,13 +902,6 @@ const getCardAdminData = async (req, res) => {
 
         const { status, filter, startDate, endDate } = req.query;
 
-        const formatDate = (date) => {
-            const d = new Date(date);
-            const day = String(d.getDate()).padStart(2, '0');
-            const month = String(d.getMonth() + 1).padStart(2, '0');
-            const year = String(d.getFullYear());
-            return `${day}-${month}-${year}`;
-        };
 
         const fn_calculation = async (data) => {
 
@@ -949,51 +919,61 @@ const getCardAdminData = async (req, res) => {
         };
 
         if (filter === "today") {
-            const today = formatDate(new Date());
-
+            const today = new Date();
+            today.setUTCHours(0, 0, 0, 0); // Start of today in UTC
+        
+            const endOfToday = new Date();
+            endOfToday.setUTCHours(23, 59, 59, 999); // End of today in UTC
+        
+            console.log("Date range for today:", today.toISOString(), endOfToday.toISOString());
+        
             const data = await Ledger.aggregate([
-                {
-                    $addFields: {
-                        createdAtFormatted: {
-                            $dateToString: { format: "%d-%m", date: "$createdAt" }
-                        }
-                    }
-                },
-                {
-                    $match: { "createdAtFormatted": today, "status": status }
-                }
-            ]);
-            return fn_calculation(data);
-        };
-
-        if (filter === "7days") {
-            const today = formatDate(new Date());
-            const sevenDaysAgo = formatDate(new Date(new Date().setDate(new Date().getDate() - 7)));
-
-            const data = await Ledger.aggregate([
-                {
-                    $addFields: {
-                        createdAtFormatted: {
-                            $dateToString: { format: "%d-%m", date: "$createdAt" }
-                        }
-                    }
-                },
                 {
                     $match: {
-                        "createdAtFormatted": { $gte: sevenDaysAgo, $lte: today },
-                        "status": status
+                        createdAt: { $gte: today, $lte: endOfToday }, // Direct date comparison
+                        status: status
                     }
                 }
             ]);
-
+        
             return fn_calculation(data);
-        };
+        }
+        
+
+        if (filter === "7days") {
+            const today = new Date();
+            today.setUTCHours(23, 59, 59, 999); // Set end of today in UTC
+        
+            const sevenDaysAgo = new Date();
+            sevenDaysAgo.setUTCDate(sevenDaysAgo.getUTCDate() - 7);
+            sevenDaysAgo.setUTCHours(0, 0, 0, 0); // Set start of the 7th day in UTC
+        
+            console.log("Date range for 7 days:", sevenDaysAgo.toISOString(), today.toISOString());
+        
+            const data = await Ledger.aggregate([
+                {
+                    $match: {
+                        createdAt: { $gte: sevenDaysAgo, $lte: today }, // Direct date comparison
+                        status: status
+                    }
+                }
+            ]);
+        
+            return fn_calculation(data);
+        }
+        
+
+     
 
         if (filter === "30days") {
             const today = new Date();
-            const thirtyDaysAgo = new Date();
-            thirtyDaysAgo.setDate(today.getDate() - 30);
-
+            today.setUTCHours(23, 59, 59, 999); // Ensure end of today in UTC
+            const thirtyDaysAgo = new Date(today);
+            thirtyDaysAgo.setUTCDate(today.getUTCDate() - 30);
+            thirtyDaysAgo.setUTCHours(0, 0, 0, 0); // Ensure start of the day in UTC
+        
+            console.log("Date range for 30 days:", thirtyDaysAgo.toISOString(), today.toISOString());
+        
             const data = await Ledger.aggregate([
                 {
                     $match: {
@@ -1002,9 +982,12 @@ const getCardAdminData = async (req, res) => {
                     }
                 }
             ]);
-
+        
             return fn_calculation(data);
-        };
+        }
+        
+
+
 
         if (filter === "all") {
             const data = await Ledger.aggregate([
@@ -1019,32 +1002,26 @@ const getCardAdminData = async (req, res) => {
         };
 
         if (filter === "custom") {
-            const start = formatDate(new Date(startDate));
-            const oldEnd = formatDate(new Date(endDate));
-            const formatedEndDate = oldEnd.split("-")?.[0] == 1 ? 31 : oldEnd.split("-")?.[0] - 1;
-            const formatedEndMonth = oldEnd.split("-")?.[1] == 1 ? 12 : oldEnd.split("-")?.[0] == 1 ? oldEnd.split("-")?.[1] - 1 : oldEnd.split("-")?.[1];
-            const end = `${formatedEndDate}-${formatedEndMonth}-${oldEnd.split("-")?.[2]}`;
-
-            console.log("format ", start, end);
-
+            const start = new Date(startDate);
+            start.setUTCHours(0, 0, 0, 0); // Start of the selected start day in UTC
+        
+            const end = new Date(endDate);
+            end.setUTCHours(23, 59, 59, 999); // End of the selected end day in UTC
+        
+            console.log("Formatted Date Range:", start.toISOString(), end.toISOString());
+        
             const data = await Ledger.aggregate([
                 {
-                    $addFields: {
-                        createdAtFormatted: {
-                            $dateToString: { format: "%d-%m-%Y", date: "$createdAt" }
-                        }
-                    }
-                },
-                {
                     $match: {
-                        "createdAtFormatted": { $gte: start, $lte: end },
-                        "status": status
+                        createdAt: { $gte: start, $lte: end }, // Direct date comparison
+                        status: status
                     }
                 }
             ]);
-
+        
             return fn_calculation(data);
-        };
+        }
+        
 
         const data = await Ledger.aggregate([
             {
@@ -1622,109 +1599,163 @@ const getMerchantExcelWithdrawData = async (req, res) => {
 // 3. Get  by id
 const getCardMerchantData = async (req, res) => {
     try {
-
         const token = req.header('Authorization')?.replace('Bearer ', '');
-
         if (!token) {
             return res.status(401).json({ status: 'fail', message: 'No token provided' });
         }
 
-
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const adminId = decoded.adminId;
+        var adminId = decoded.adminId;
 
+
+        if (typeof adminId === "string") {
+            adminId = new mongoose.Types.ObjectId(adminId);
+        }        
 
         if (!adminId) {
             return res.status(400).json({ status: 'fail', message: 'Merchant not found!' });
         }
 
-
-
         const { status, filter, startDate, endDate } = req.query;
-        let dateFilter = {};
-        const now = new Date();
 
-        // Handle Start and End Date Filtering
-        if (startDate || endDate) {
-            dateFilter.createdAt = {};
+        
+        const fn_calculation = async (data) => {
 
-            if (startDate) {
-                const start = new Date(startDate);
-                if (!isNaN(start)) {
-                    start.setHours(0, 0, 0, 0);
-                    dateFilter.createdAt.$gte = start;
-                }
-            }
+            const totalSum = data.reduce((sum, record) => sum + (record.total || 0), 0);
+            const merchantTotalSum = data.reduce((sum, record) => sum + (record.merchantTotal || 0), 0);
+            const adminTotalSum = data.reduce((sum, record) => sum + (record.adminTotal || 0), 0);
 
-            if (endDate) {
-                const end = new Date(endDate);
-                if (!isNaN(end)) {
-                    end.setHours(23, 59, 59, 999);
-                    dateFilter.createdAt.$lte = end;
-                }
-            }
-
-            // Ensure both startDate and endDate are properly handled
-            if (startDate && endDate && new Date(startDate).getTime() === new Date(endDate).getTime()) {
-                dateFilter.createdAt = {
-                    $gte: new Date(startDate).setHours(0, 0, 0, 0),
-                    $lte: new Date(endDate).setHours(23, 59, 59, 999),
-                };
-            }
-        }
-
-        // Apply Time Filter (Only if Start/End Date is NOT used)
-        if (!startDate && !endDate) {
-            switch (filter) {
-                case 'today':
-                    dateFilter = {
-                        createdAt: {
-                            $gte: new Date().setHours(0, 0, 0, 0),
-                            $lt: new Date().setHours(23, 59, 59, 999),
-                        },
-                    };
-                    break;
-                case '7days':
-                    dateFilter = {
-                        createdAt: {
-                            $gte: new Date(new Date().setDate(now.getDate() - 7)),
-                        },
-                    };
-                    break;
-                case '30days':
-                    dateFilter = {
-                        createdAt: {
-                            $gte: new Date(new Date().setDate(now.getDate() - 30)),
-                        },
-                    };
-                    break;
-                case 'all':
-                default:
-                    dateFilter = {}; // No filter applied
-                    break;
-            }
-        }
-
-
-        const query = {
-            ...dateFilter,
-            ...(status && { status }), // Include status if provided
-            merchantId: adminId
+            return res.status(200).json({
+                status: 'ok',
+                data: totalSum,
+                merchantTotalSum,
+                adminTotalSum,
+                totalTransaction: data?.length || 0
+            });
         };
 
-        const data = await Ledger.find(query);
+        if (filter === "today") {
+            const today = new Date();
+            today.setUTCHours(0, 0, 0, 0); // Start of today in UTC
+        
+            const endOfToday = new Date();
+            endOfToday.setUTCHours(23, 59, 59, 999); // End of today in UTC
+        
+            console.log("Date range for today:", today.toISOString(), endOfToday.toISOString());
+        
+            const data = await Ledger.aggregate([
+                {
+                    $match: {
+                        createdAt: { $gte: today, $lte: endOfToday }, // Direct date comparison
+                        status: status,
+                        merchantId: adminId
+                    }
+                }
+            ]);
+        
+            return fn_calculation(data);
+        }
+        
+
+        if (filter === "7days") {
+            const today = new Date();
+            today.setUTCHours(23, 59, 59, 999); // Set end of today in UTC
+        
+            const sevenDaysAgo = new Date();
+            sevenDaysAgo.setUTCDate(sevenDaysAgo.getUTCDate() - 7);
+            sevenDaysAgo.setUTCHours(0, 0, 0, 0); // Set start of the 7th day in UTC
+        
+            console.log("Date range for 7 days:", sevenDaysAgo.toISOString(), today.toISOString());
+        
+            const data = await Ledger.aggregate([
+                {
+                    $match: {
+                        createdAt: { $gte: sevenDaysAgo, $lte: today }, // Direct date comparison
+                        status: status,
+                        merchantId: adminId
+                    }
+                }
+            ]);
+        
+            return fn_calculation(data);
+        }
+        
+
+     
+
+        if (filter === "30days") {
+            const today = new Date();
+            today.setUTCHours(23, 59, 59, 999); // Ensure end of today in UTC
+            const thirtyDaysAgo = new Date(today);
+            thirtyDaysAgo.setUTCDate(today.getUTCDate() - 30);
+            thirtyDaysAgo.setUTCHours(0, 0, 0, 0); // Ensure start of the day in UTC
+        
+            console.log("Date range for 30 days:", thirtyDaysAgo.toISOString(), today.toISOString());
+        
+            const data = await Ledger.aggregate([
+                {
+                    $match: {
+                        "createdAt": { $gte: thirtyDaysAgo, $lte: today },
+                        "status": status,
+                        merchantId: adminId
+                    }
+                }
+            ]);
+        
+            return fn_calculation(data);
+        }
+        
 
 
-        const totalSum = data.reduce((sum, record) => sum + (record.total || 0), 0);
 
-        const merchantTotalSum = data.reduce((sum, record) => sum + (record.merchantTotal || 0), 0);
+        if (filter === "all") {
+            const data = await Ledger.aggregate([
+                {
+                    $match: {
+                        "status": status,
+                        merchantId: adminId
+                    }
+                }
+            ]);
 
-        const adminTotalSum = data.reduce((sum, record) => sum + (record.adminTotal || 0), 0);
+            return fn_calculation(data);
+        };
 
+        if (filter === "custom") {
+            const start = new Date(startDate);
+            start.setUTCHours(0, 0, 0, 0); // Start of the selected start day in UTC
+        
+            const end = new Date(endDate);
+            end.setUTCHours(23, 59, 59, 999); // End of the selected end day in UTC
+        
+            console.log("Formatted Date Range:", start.toISOString(), end.toISOString());
+        
+            const data = await Ledger.aggregate([
+                {
+                    $match: {
+                        createdAt: { $gte: start, $lte: end }, // Direct date comparison
+                        status: status,
+                        merchantId: adminId
+                    }
+                }
+            ]);
+        
+            return fn_calculation(data);
+        }
+        
 
-        return res.status(200).json({ status: 'ok', data: totalSum, merchantTotalSum, adminTotalSum, totalTransaction: data.length });
+        const data = await Ledger.aggregate([
+            {
+                $match: {
+                    "status": status,
+                    merchantId: adminId
+                }
+            }
+        ]);
 
-    } catch (err) {
+        return fn_calculation(data);
+
+    }  catch (err) {
         res.status(500).json({ error: err.message });
     }
 };

@@ -1,7 +1,7 @@
 const Bank = require('../Models/BankModel');
 const BankLog = require('../Models/BankLogModel');
 const jwt = require('jsonwebtoken');
-
+ 
 
 // 1. Create 
 const createData = async (req, res) => {
