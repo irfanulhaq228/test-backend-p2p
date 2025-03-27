@@ -215,6 +215,24 @@ app.post("/extract-utr", upload.single("image"), async (req, res) => {
   }
 });
 
+app.post("/extract-utr-text", async (req, res) => {
+  try {
+    const { utr, amount } = req.body;
+
+    console.log("utr from text ==> ", utr);
+    console.log("amount from text ==> ", amount);
+
+    if (!utr) return res.status(200).json({ message: "UTR not received" });
+    if (!amount) return res.status(200).json({ message: "Amount not received" });
+
+    return res.status(200).json({ message: "UTR and Amount Delivered successfully" });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
 const declineOldLedgers = async () => {
   try {
     const data = await Admin.find();
@@ -239,10 +257,6 @@ const declineOldLedgers = async () => {
   }
 };
 
-
-
-
-
 setInterval(() => {
   declineOldLedgers()
 }, 3000);
@@ -259,7 +273,7 @@ const io = new Server(server, {
 })
 
 
-ledger(io)
+ledger.initializeSocket(io);
 
 
 

@@ -13,6 +13,8 @@ const fs = require("fs");
 const { notifySubscribers } = require('../Middleware/webhookService');
 const excelWithdrawModel = require('../Models/ExcelWithdrawModel');
 const mongoose = require("mongoose");
+const { notifyUsers } = require('../socket/ledgerSocket');
+
 
 
 // Function to extract amount and transaction ID from text
@@ -191,6 +193,12 @@ const createData = async (req, res) => {
                 const data = await Ledger.create({
                     ...req.body, image: image ? image?.path : "", merchantId: websiteData?._id, adminId: websiteData?.adminId, adminTotal, merchantTotal
                 });
+
+
+                const createDataLedger = await Ledger.findById(data?._id).populate(['merchantId', "bankId"])
+
+                notifyUsers(websiteData?._id, "ledgerUpdated", { type: "created", ledger: createDataLedger });
+
 
 
 
@@ -579,11 +587,13 @@ const getAllMerchantData = async (req, res) => {
 
         query.merchantId = adminId
 
-
         if (search) {
-            query.utr = { $regex: ".*" + search + ".*", $options: "i" };
-            query._id = { $regex: ".*" + search + ".*", $options: "i" };
+            query.$or = [
+                { utr: { $regex: req.query.search, $options: "i" } },
+                { trnNo: { $regex: req.query.search, $options: "i" } }
+            ];
         }
+
 
         if (req.query.status) {
             query.status = req.query.status;
@@ -615,16 +625,16 @@ const getAllMerchantData = async (req, res) => {
         if (req.query.startDate || req.query.endDate) {
             const startDate = new Date(req.query.startDate);
             const endDate = new Date(req.query.endDate);
-            
+
             // Ensure endDate includes the full day
             endDate.setUTCHours(23, 59, 59, 999);
-        
+
             console.log(startDate, endDate);
-        
+
             query.createdAt = { $gte: startDate, $lte: endDate };
         }
-        
-        
+
+
 
 
 
@@ -638,7 +648,7 @@ const getAllMerchantData = async (req, res) => {
         const count = await Ledger.find(query).populate(["bankId"]).sort({ createdAt: -1 }).countDocuments();
 
         console.log(count);
-        
+
 
         return res.status(200).json({
             status: "ok",
@@ -733,12 +743,12 @@ const getAllMerchantDataWithoutFilter = async (req, res) => {
         if (req.query.startDate || req.query.endDate) {
             const startDate = new Date(req.query.startDate);
             const endDate = new Date(req.query.endDate);
-            
+
             // Ensure endDate includes the full day
             endDate.setUTCHours(23, 59, 59, 999);
-        
+
             console.log(startDate, endDate);
-        
+
             query.createdAt = { $gte: startDate, $lte: endDate };
         }
 
@@ -902,31 +912,38 @@ const getCardAdminData = async (req, res) => {
 
         const { status, filter, startDate, endDate } = req.query;
 
-
         const fn_calculation = async (data) => {
+
+            // const allMerchant = await Merchant.find({ adminId });
+            const allWithdraws = await withdrawModel.find({ status: "Approved" });
+            const allWithdrawsExcel = await excelWithdrawModel.find({ status: "Approved" });
 
             const totalSum = data.reduce((sum, record) => sum + (record.total || 0), 0);
             const merchantTotalSum = data.reduce((sum, record) => sum + (record.merchantTotal || 0), 0);
             const adminTotalSum = data.reduce((sum, record) => sum + (record.adminTotal || 0), 0);
+            // const merchantAvailBalance = allMerchant.reduce((sum, record) => sum + (record.wallet || 0), 0);
+            const totalWithdraws = allWithdraws.reduce((sum, record) => sum + (record.amount || 0), 0);
+            const totalExcelWithdraws = allWithdrawsExcel.reduce((sum, record) => sum + (record.amount || 0), 0);
 
             return res.status(200).json({
                 status: 'ok',
                 data: totalSum,
                 merchantTotalSum,
                 adminTotalSum,
-                totalTransaction: data?.length || 0
+                totalTransaction: data?.length || 0,
+                merchantAvailBalance: totalSum-(totalWithdraws + totalExcelWithdraws)
             });
         };
 
         if (filter === "today") {
             const today = new Date();
             today.setUTCHours(0, 0, 0, 0); // Start of today in UTC
-        
+
             const endOfToday = new Date();
             endOfToday.setUTCHours(23, 59, 59, 999); // End of today in UTC
-        
+
             console.log("Date range for today:", today.toISOString(), endOfToday.toISOString());
-        
+
             const data = await Ledger.aggregate([
                 {
                     $match: {
@@ -935,21 +952,20 @@ const getCardAdminData = async (req, res) => {
                     }
                 }
             ]);
-        
+
             return fn_calculation(data);
-        }
-        
+        };
 
         if (filter === "7days") {
             const today = new Date();
             today.setUTCHours(23, 59, 59, 999); // Set end of today in UTC
-        
+
             const sevenDaysAgo = new Date();
             sevenDaysAgo.setUTCDate(sevenDaysAgo.getUTCDate() - 7);
             sevenDaysAgo.setUTCHours(0, 0, 0, 0); // Set start of the 7th day in UTC
-        
+
             console.log("Date range for 7 days:", sevenDaysAgo.toISOString(), today.toISOString());
-        
+
             const data = await Ledger.aggregate([
                 {
                     $match: {
@@ -958,12 +974,9 @@ const getCardAdminData = async (req, res) => {
                     }
                 }
             ]);
-        
-            return fn_calculation(data);
-        }
-        
 
-     
+            return fn_calculation(data);
+        };
 
         if (filter === "30days") {
             const today = new Date();
@@ -971,9 +984,9 @@ const getCardAdminData = async (req, res) => {
             const thirtyDaysAgo = new Date(today);
             thirtyDaysAgo.setUTCDate(today.getUTCDate() - 30);
             thirtyDaysAgo.setUTCHours(0, 0, 0, 0); // Ensure start of the day in UTC
-        
+
             console.log("Date range for 30 days:", thirtyDaysAgo.toISOString(), today.toISOString());
-        
+
             const data = await Ledger.aggregate([
                 {
                     $match: {
@@ -982,12 +995,9 @@ const getCardAdminData = async (req, res) => {
                     }
                 }
             ]);
-        
+
             return fn_calculation(data);
-        }
-        
-
-
+        };
 
         if (filter === "all") {
             const data = await Ledger.aggregate([
@@ -1004,12 +1014,12 @@ const getCardAdminData = async (req, res) => {
         if (filter === "custom") {
             const start = new Date(startDate);
             start.setUTCHours(0, 0, 0, 0); // Start of the selected start day in UTC
-        
+
             const end = new Date(endDate);
             end.setUTCHours(23, 59, 59, 999); // End of the selected end day in UTC
-        
+
             console.log("Formatted Date Range:", start.toISOString(), end.toISOString());
-        
+
             const data = await Ledger.aggregate([
                 {
                     $match: {
@@ -1018,10 +1028,9 @@ const getCardAdminData = async (req, res) => {
                     }
                 }
             ]);
-        
+
             return fn_calculation(data);
         }
-        
 
         const data = await Ledger.aggregate([
             {
@@ -1610,7 +1619,7 @@ const getCardMerchantData = async (req, res) => {
 
         if (typeof adminId === "string") {
             adminId = new mongoose.Types.ObjectId(adminId);
-        }        
+        }
 
         if (!adminId) {
             return res.status(400).json({ status: 'fail', message: 'Merchant not found!' });
@@ -1618,7 +1627,7 @@ const getCardMerchantData = async (req, res) => {
 
         const { status, filter, startDate, endDate } = req.query;
 
-        
+
         const fn_calculation = async (data) => {
 
             const totalSum = data.reduce((sum, record) => sum + (record.total || 0), 0);
@@ -1637,12 +1646,12 @@ const getCardMerchantData = async (req, res) => {
         if (filter === "today") {
             const today = new Date();
             today.setUTCHours(0, 0, 0, 0); // Start of today in UTC
-        
+
             const endOfToday = new Date();
             endOfToday.setUTCHours(23, 59, 59, 999); // End of today in UTC
-        
+
             console.log("Date range for today:", today.toISOString(), endOfToday.toISOString());
-        
+
             const data = await Ledger.aggregate([
                 {
                     $match: {
@@ -1652,21 +1661,21 @@ const getCardMerchantData = async (req, res) => {
                     }
                 }
             ]);
-        
+
             return fn_calculation(data);
         }
-        
+
 
         if (filter === "7days") {
             const today = new Date();
             today.setUTCHours(23, 59, 59, 999); // Set end of today in UTC
-        
+
             const sevenDaysAgo = new Date();
             sevenDaysAgo.setUTCDate(sevenDaysAgo.getUTCDate() - 7);
             sevenDaysAgo.setUTCHours(0, 0, 0, 0); // Set start of the 7th day in UTC
-        
+
             console.log("Date range for 7 days:", sevenDaysAgo.toISOString(), today.toISOString());
-        
+
             const data = await Ledger.aggregate([
                 {
                     $match: {
@@ -1676,12 +1685,12 @@ const getCardMerchantData = async (req, res) => {
                     }
                 }
             ]);
-        
+
             return fn_calculation(data);
         }
-        
 
-     
+
+
 
         if (filter === "30days") {
             const today = new Date();
@@ -1689,9 +1698,9 @@ const getCardMerchantData = async (req, res) => {
             const thirtyDaysAgo = new Date(today);
             thirtyDaysAgo.setUTCDate(today.getUTCDate() - 30);
             thirtyDaysAgo.setUTCHours(0, 0, 0, 0); // Ensure start of the day in UTC
-        
+
             console.log("Date range for 30 days:", thirtyDaysAgo.toISOString(), today.toISOString());
-        
+
             const data = await Ledger.aggregate([
                 {
                     $match: {
@@ -1701,10 +1710,10 @@ const getCardMerchantData = async (req, res) => {
                     }
                 }
             ]);
-        
+
             return fn_calculation(data);
         }
-        
+
 
 
 
@@ -1724,12 +1733,12 @@ const getCardMerchantData = async (req, res) => {
         if (filter === "custom") {
             const start = new Date(startDate);
             start.setUTCHours(0, 0, 0, 0); // Start of the selected start day in UTC
-        
+
             const end = new Date(endDate);
             end.setUTCHours(23, 59, 59, 999); // End of the selected end day in UTC
-        
+
             console.log("Formatted Date Range:", start.toISOString(), end.toISOString());
-        
+
             const data = await Ledger.aggregate([
                 {
                     $match: {
@@ -1739,10 +1748,10 @@ const getCardMerchantData = async (req, res) => {
                     }
                 }
             ]);
-        
+
             return fn_calculation(data);
         }
-        
+
 
         const data = await Ledger.aggregate([
             {
@@ -1755,7 +1764,7 @@ const getCardMerchantData = async (req, res) => {
 
         return fn_calculation(data);
 
-    }  catch (err) {
+    } catch (err) {
         res.status(500).json({ error: err.message });
     }
 };
@@ -1990,6 +1999,9 @@ const updateData = async (req, res) => {
                     { new: true }
                 );
 
+
+
+
                 await BankLog.create({ bankId: banks[0]?._id, status: 'Active', reason: 'Bank is Active automatically.' })
 
             }
@@ -1999,6 +2011,12 @@ const updateData = async (req, res) => {
         const data = await Ledger.findByIdAndUpdate(id,
             { ...req.body, image: image, activity },
             { new: true });
+
+
+        const updateDataLedger = await Ledger.findById(data?._id).populate(['merchantId', "bankId"])
+
+
+        notifyUsers(getImage.merchantId, "ledgerUpdated", { type: "updated", ledger: updateDataLedger });
 
 
         if (req.body.status) {
