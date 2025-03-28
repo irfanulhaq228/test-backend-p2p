@@ -14,6 +14,8 @@ const { notifySubscribers } = require('../Middleware/webhookService');
 const excelWithdrawModel = require('../Models/ExcelWithdrawModel');
 const mongoose = require("mongoose");
 const { notifyUsers } = require('../socket/ledgerSocket');
+const merchantModel = require('../Models/MerchantModel');
+const withdrawModel = require('../Models/WithdrawModel');
 
 
 
@@ -87,165 +89,88 @@ const imageUploadData = async (req, res) => {
 // 1. Create 
 const createData = async (req, res) => {
     try {
+        const { website, bankId, total, utr } = req.body;
 
-        if (!req.body.website) {
-            return res.status(400).json({ status: 'fail', data, message: 'Please provide website!' });
+        if (!website) {
+            return res.status(400).json({ status: 'fail', message: 'Please provide website!' });
+        }
+        if (!bankId) {
+            return res.status(400).json({ status: 'fail', message: 'Please select bank account!' });
+        }
+        if (!total) {
+            return res.status(400).json({ status: 'fail', message: 'Please provide the total amount for your ledger!' });
         }
 
-        if (!req.body.bankId) {
-            return res.status(400).json({ status: 'fail', data, message: 'Please select bank account!' });
+        const duplicateUTR = await Ledger.findOne({ utr, status: { $in: ["Pending", "Approved"] } });
+        if (duplicateUTR) {
+            return res.status(400).json({ status: 'fail', message: 'Please upload a unique UTR transaction!' });
         }
 
-        if (!req.body.total) {
-            return res.status(400).json({ status: 'fail', data, message: 'Please give total amount of your ledger!' });
+        const websiteData = await Merchant.findOne({ website });
+        const bankData = await Bank.findOne({ _id: bankId });
+
+        if (!bankData) {
+            return res.status(404).json({ status: 'fail', message: 'Bank not found!' });
         }
 
-        const deplicateUTR = await Ledger.findOne({ utr: req.body.utr, status: { $in: ["Pending", "Approved"] } });
+        // Check if the bank has enough transaction limit and remaining limit
+        if (bankData.remainingTransLimit <= 1 || bankData.remainingLimit < total) {
+            // Block the bank if limits exceeded
+            await Bank.findByIdAndUpdate(bankData._id, { block: true }, { new: true });
+            await BankLog.create({ bankId: bankData._id, status: 'Inactive', reason: 'Bank blocked due to limit exceeded.' });
 
-        if (deplicateUTR) {
-            return res.status(401).json({ status: 'fail', message: 'Please upload unique utr transaction!' });
-        }
-        else {
-
-
-            const websiteData = await Merchant.findOne({ website: req.body.website });
-            const bankData = await Bank.findOne({ _id: req.body.bankId });
-            const ledgerData = await Ledger.find({ bankId: bankData?._id });
-
-            if (bankData?.noOfTrans < ((bankData?.remainingTransLimit) + 1)) {
-
-
-                const banks = await Bank.find({
-                    accountType: bankData?.accountType,
-                    $expr: {
-                        $and: [
-                            { $gt: ["$accountLimit", { $add: ["$remainingLimit", parseFloat(req.body.total)] }] },
-                            { $gt: ["$remainingTransLimit", 1] }
-                        ]
-                    }
-                });
-
-
-                if (banks?.length === 0) {
-                    return res.status(400).json({ status: 'fail', message: 'All bank accounts reach the maximum limit of transaction. Please contact to the support!' });
+            // Find another active bank with sufficient limits
+            const availableBanks = await Bank.find({
+                accountType: bankData.accountType,
+                block: false,
+                $expr: {
+                    $and: [
+                        { $gt: ["$remainingLimit", total] },
+                        { $gt: ["$remainingTransLimit", 1] }
+                    ]
                 }
+            });
 
-                const updateBank = await Bank.findOneAndUpdate(
-                    { _id: banks[0]._id },
-                    { block: false, },
-                    { new: true }
-                );
-
-                await BankLog.create({ bankId: banks[0]?._id, status: 'Active', reason: 'Bank is Active automatically.' })
-
-                if (updateBank) {
-                    await Bank.findOneAndUpdate({ _id: bankData?._id }, { block: true }, { new: true });
-                    await BankLog.create({ bankId: bankData?._id, status: 'InActive', reason: 'Bank is Inactive due to limit exceed.' })
-                    return res.status(400).json({ status: 'fail', message: 'This card has reached its maximum transaction limit, try again with new one' });
-                }
-
+            if (!availableBanks.length) {
+                return res.status(400).json({ status: 'fail', message: 'All bank accounts have reached their limits. Please contact support!' });
             }
 
+            // Activate the new bank
+            await Bank.findByIdAndUpdate(availableBanks[0]._id, { block: false }, { new: true });
+            await BankLog.create({ bankId: availableBanks[0]._id, status: 'Active', reason: 'Bank is automatically activated.' });
 
-
-
-
-
-            const tenPercentAmount = parseFloat(bankData?.accountLimit) * (1 / 100);
-            if (tenPercentAmount < parseFloat(bankData?.remainingLimit)) {
-
-                if (bankData?.remainingLimit < req.body.total) {
-
-                    const banks = await Bank.find({
-                        accountType: bankData?.accountType,
-                        $expr: {
-                            $gt: ["$remainingLimit", req.body.total]
-                        }
-                    });
-
-                    if (banks?.length === 0) {
-                        return res.status(400).json({ status: 'fail', message: 'All bank accounts reach the maximum limit of deposit. Please contact to the support!' });
-                    }
-
-                    const updateBank = await Bank.findOneAndUpdate(
-                        { _id: banks[0]._id },
-                        { block: false },
-                        { new: true }
-                    );
-
-                    await BankLog.create({ bankId: banks[0]?._id, status: 'Active', reason: 'Bank is Active automatically.' })
-
-
-
-                    if (updateBank) {
-                        await Bank.findOneAndUpdate({ _id: bankData?._id }, { block: true }, { new: true });
-                        await BankLog.create({ bankId: bankData?._id, status: 'InActive', reason: 'Due to Amount Limit Exceed.' })
-                        return res.status(400).json({ status: 'fail', message: 'This card has reached its maximum limit, try again with new one' });
-                    }
-                }
-
-                const adminTotal = (req.body.total * websiteData?.commision) / 100
-
-                const merchantTotal = req.body.total - adminTotal
-
-                const image = req.file;
-
-                const data = await Ledger.create({
-                    ...req.body, image: image ? image?.path : "", merchantId: websiteData?._id, adminId: websiteData?.adminId, adminTotal, merchantTotal
-                });
-
-
-                const createDataLedger = await Ledger.findById(data?._id).populate(['merchantId', "bankId"])
-
-                notifyUsers(websiteData?._id, "ledgerUpdated", { type: "created", ledger: createDataLedger });
-
-
-
-
-                await Bank.findByIdAndUpdate(req.body.bankId,
-                    { remainingLimit: bankData?.remainingLimit - parseFloat(req.body.total), remainingTransLimit: ledgerData?.length },
-                    { new: true });
-
-                return res.status(200).json({ status: 'ok', data, message: 'Data Created Successfully!' });
-            }
-            else {
-
-                const data = await Bank.findOneAndUpdate({ _id: bankData?._id },
-                    { block: true },
-                    { new: true });
-
-                await BankLog.create({ bankId: bankData?._id, status: 'InActive', reason: 'Due to Amount Limit Exceed.' })
-
-                const banks = await Bank.find({
-                    accountType: bankData?.accountType,
-                    $expr: {
-                        $and: [
-                            { $gt: ["$accountLimit", { $add: ["$remainingLimit", parseFloat(req.body.total)] }] },
-                            { $gt: ["$remainingTransLimit", 1] }
-                        ]
-                    }
-                });
-
-
-                if (banks?.length === 0) {
-                    return res.status(400).json({ status: 'fail', data, message: 'All bank accounts reach the maximum limit of deposit. Please contact to the support!' });
-                }
-
-                await Bank.findOneAndUpdate({ _id: banks[0]?._id },
-                    { block: false },
-                    { new: true });
-
-                await BankLog.create({ bankId: banks[0]?._id, status: 'Active', reason: 'Bank is Active automatically.' })
-
-
-                return res.status(400).json({ status: 'fail', data, message: 'Bank account reach the maximum limit of deposit. Please refresh your browser to get another bank for transaction!' });
-            }
+            return res.status(400).json({ status: 'fail', message: 'This bank has reached its limit. A new bank has been activated, please try again.' });
         }
-    }
-    catch (err) {
-        res.status(500).json({ error: err.message });
+
+        // Calculate amounts
+        const adminTotal = (total * websiteData?.commision) / 100;
+        const merchantTotal = total - adminTotal;
+        const image = req.file?.path || "";
+
+        // Create Ledger Entry
+        const newLedger = await Ledger.create({
+            ...req.body,
+            image,
+            merchantId: websiteData?._id,
+            adminId: websiteData?.adminId,
+            adminTotal,
+            merchantTotal
+        });
+
+
+        const createDataLedger = await Ledger.findById(newLedger?._id).populate(['merchantId', "bankId"])
+
+        notifyUsers(websiteData?._id, "ledgerUpdated", { type: "created", ledger: createDataLedger });
+
+
+        return res.status(200).json({ status: 'ok', data: newLedger, message: 'Data created successfully!' });
+
+    } catch (err) {
+        console.error("Error creating data:", err);
+        return res.status(500).json({ status: 'error', message: err.message });
     }
 };
+
 
 
 
@@ -914,16 +839,12 @@ const getCardAdminData = async (req, res) => {
 
         const fn_calculation = async (data) => {
 
-            // const allMerchant = await Merchant.find({ adminId });
-            const allWithdraws = await withdrawModel.find({ status: "Approved" });
-            const allWithdrawsExcel = await excelWithdrawModel.find({ status: "Approved" });
+            const allMerchant = await Merchant.find({ adminId });
 
             const totalSum = data.reduce((sum, record) => sum + (record.total || 0), 0);
             const merchantTotalSum = data.reduce((sum, record) => sum + (record.merchantTotal || 0), 0);
             const adminTotalSum = data.reduce((sum, record) => sum + (record.adminTotal || 0), 0);
-            // const merchantAvailBalance = allMerchant.reduce((sum, record) => sum + (record.wallet || 0), 0);
-            const totalWithdraws = allWithdraws.reduce((sum, record) => sum + (record.amount || 0), 0);
-            const totalExcelWithdraws = allWithdrawsExcel.reduce((sum, record) => sum + (record.amount || 0), 0);
+            const merchantAvailBalance = allMerchant.reduce((sum, record) => sum + (record.wallet || 0), 0);
 
             return res.status(200).json({
                 status: 'ok',
@@ -931,7 +852,7 @@ const getCardAdminData = async (req, res) => {
                 merchantTotalSum,
                 adminTotalSum,
                 totalTransaction: data?.length || 0,
-                merchantAvailBalance: totalSum-(totalWithdraws + totalExcelWithdraws)
+                merchantAvailBalance
             });
         };
 
@@ -1627,6 +1548,8 @@ const getCardMerchantData = async (req, res) => {
 
         const { status, filter, startDate, endDate } = req.query;
 
+        const getMerchant = await Merchant.findById(adminId);
+
 
         const fn_calculation = async (data) => {
 
@@ -1634,12 +1557,15 @@ const getCardMerchantData = async (req, res) => {
             const merchantTotalSum = data.reduce((sum, record) => sum + (record.merchantTotal || 0), 0);
             const adminTotalSum = data.reduce((sum, record) => sum + (record.adminTotal || 0), 0);
 
+
+
             return res.status(200).json({
                 status: 'ok',
                 data: totalSum,
                 merchantTotalSum,
                 adminTotalSum,
-                totalTransaction: data?.length || 0
+                totalTransaction: data?.length || 0,
+                availableWithdraw: getMerchant?.wallet
             });
         };
 
@@ -1967,13 +1893,12 @@ const updateData = async (req, res) => {
 
 
             const remainingTransLimit = bankData?.remainingTransLimit - 1
+            const remainingLimit = bankData?.remainingLimit - getImage?.total
 
-            const updateBank = await Bank.findByIdAndUpdate(bankData?._id,
-                { remainingTransLimit },
-                { new: true });
+            
 
 
-            if (updateBank && bankData?.remainingTransLimit - 1 === 0) {
+            if ((remainingTransLimit === 0) && (remainingLimit<=0)) {
 
                 await Bank.findOneAndUpdate({ _id: bankData?._id }, { block: true }, { new: true });
                 await BankLog.create({ bankId: bankData?._id, status: 'InActive', reason: 'Due to Transaction Limit Exceed.' })
@@ -1983,7 +1908,7 @@ const updateData = async (req, res) => {
                     accountType: bankData?.accountType,
                     $expr: {
                         $and: [
-                            { $gt: ["$accountLimit", { $add: ["$remainingLimit", parseFloat(req.body.total)] }] },
+                            { $gt: ["$remainingLimit",  getImage?.total] },
                             { $gt: ["$remainingTransLimit", 1] }
                         ]
                     }
@@ -2004,6 +1929,11 @@ const updateData = async (req, res) => {
 
                 await BankLog.create({ bankId: banks[0]?._id, status: 'Active', reason: 'Bank is Active automatically.' })
 
+            }
+            else{
+                 await Bank.findByIdAndUpdate(bankData?._id,
+                    { remainingTransLimit, remainingLimit },
+                    { new: true });
             }
 
         }

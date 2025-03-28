@@ -47,9 +47,9 @@ console.log(adminId);
         });
 
 
-        // await Merchant.findByIdAndUpdate(adminId, {
-        //     wallet: merchantData?.wallet - req.body.amountINR
-        // })
+        await Merchant.findByIdAndUpdate(adminId, {
+            wallet: merchantData?.wallet - req.body.amountINR
+        })
 
 
         return res.status(200).json({ status: 'ok', data, message: 'Data Created Successfully!' });
