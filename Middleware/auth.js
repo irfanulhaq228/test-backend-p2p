@@ -12,7 +12,7 @@ const authenticate = (req, res, next) => {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     // console.log(de);
-    
+
     req.user = decoded; // Attach user data to the request object
     next();
   } catch (err) {
